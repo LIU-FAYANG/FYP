@@ -130,7 +130,6 @@ def cl_init(cls, config):
 
 def cl_forward(cls,
     encoder,
-    count_step,
     input_ids=None,
     attention_mask=None,
     token_type_ids=None,
@@ -198,13 +197,16 @@ def cl_forward(cls,
 
     #increment count step by one for each forward.
     #when counter reach warmp step, change distill weight to 1 and start distillation.
-    count_step += 1
+    cls.count_step += 1
     # Update distill_weight based on count_step
-    if count_step >= cls.model_args.warmup_steps:
+    
+    if cls.count_step == cls.model_args.CL_steps:        
         print("Start Distillation !!!!!!!!!!")
         print("Distill weight change from 0 to 1")
+        #print(cls.model_args.distill_weight)        
         cls.model_args.distill_weight = 1
 
+    #print(cls.model_args.distill_weight)
 
 
     # contrastive learning
@@ -437,7 +439,7 @@ class BertForCL(BertPreTrainedModel):
                 return_dict=return_dict,
             )
         else:
-            return cl_forward(self, self.bert, self.count_step,
+            return cl_forward(self, self.bert, 
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 token_type_ids=token_type_ids,
@@ -461,6 +463,7 @@ class RobertaForCL(RobertaPreTrainedModel):
     def __init__(self, config, *model_args, **model_kargs):
         super().__init__(config)
         self.count_step = 0
+
         self.model_args = model_kargs["model_args"]
         self.roberta = RobertaModel(config, add_pooling_layer=False)
 
@@ -469,7 +472,7 @@ class RobertaForCL(RobertaPreTrainedModel):
 
         cl_init(self, config)
 
-    def forward(self,
+    def forward(self,        
         input_ids=None,
         attention_mask=None,
         token_type_ids=None,
@@ -499,7 +502,7 @@ class RobertaForCL(RobertaPreTrainedModel):
                 return_dict=return_dict,
             )
         else:
-            return cl_forward(self, self.roberta, self.count_step,
+            return cl_forward(self, self.roberta, 
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 token_type_ids=token_type_ids,

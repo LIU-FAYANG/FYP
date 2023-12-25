@@ -13,6 +13,7 @@ from pathlib import Path
 import importlib.util
 from packaging import version
 from transformers import Trainer
+from transformers import AutoModel
 from transformers.modeling_utils import PreTrainedModel
 from transformers.training_args import ParallelMode, TrainingArguments
 from transformers.utils import logging
@@ -244,20 +245,27 @@ class CLTrainer(Trainer):
                 if self.is_world_process_zero():
                     self.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
 
-                #packing distillation teachers 
-                #when the best checkpoint is saved, shallow copy it and load it as the teache model.
-                print("deepcopy best model and load best model as distillation teacher!!!!!!")
-                best_model = copy.deepcopy(self.model)
-                self.teachers = best_model
+                #print(self.state.global_step)
+                if self.state.global_step >= self.model_args.CL_steps and self.model_args.distill_teacher is not None:
+                    #packing distillation teachers 
+                    #when the best checkpoint is saved, shallow copy it and load it as the teache model.
+                    print("deepcopy best model and load best model as distillation teacher!!!!!!")
+                    
+                    #best_model = copy.deepcopy(self.model)
+                    #self.teachers = nn.ModuleList([best_model])
+                    
+                    self.teachers = nn.ModuleList([AutoModel.from_pretrained(p).eval() for p in self.model_args.distill_teacher])
+                    if self.args.n_gpu==1:
 
-                if self.training_args.n_gpu==1:
-                    for i in range(len(self.teachers)):
-                        self.teachers[i] = self.teachers[i].to("cuda")
-                else:
-                    for i in range(len(self.teachers)):
-                        device = torch.device(f"cuda:{i%(self.training_args.n_gpu -self.training_args.n_gpu_for_training)+training_args.n_gpu_for_training}")
-                        self.teachers[i] = self.teachers[i].to(device)
-                
+                        #self.teachers = self.teachers.to("cuda")
+                        for i in range(len(self.teachers)):
+                            self.teachers[i] = self.teachers[i].to("cuda")
+                        
+                    else:
+                        for i in range(len(self.teachers)):
+                            device = torch.device(f"cuda:{i%(self.args.n_gpu -self.args.n_gpu_for_training)+self.args.n_gpu_for_training}")
+                            self.teachers[i] = self.teachers[i].to(device)
+                    
         else:
             # Save model checkpoint
             checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
@@ -512,6 +520,7 @@ class CLTrainer(Trainer):
             inputs = None
             last_inputs = None
             device0 = torch.device("cuda:0")
+            #teacher_hidden_size = self.teachers.config.hidden_size
             teacher_hidden_size = [t.config.hidden_size for t in self.teachers]
             if len(set(teacher_hidden_size))==1:
                 homo=True
@@ -525,6 +534,33 @@ class CLTrainer(Trainer):
 
             # check if all the taechers are homogeneous
             for step, inputs in enumerate(epoch_iterator):
+                
+                #copy warm-up finished model(pure CL) to another folder for further evaluation 
+                if step == self.model_args.CL_steps:
+                    source_dir = self.args.output_dir
+                    destination_dir = self.args.output_dir + "/warmup_ckpt"
+
+                    os.makedirs(destination_dir, exist_ok=True)
+                    shutil.copytree(source_dir, destination_dir, dirs_exist_ok=True)
+                
+                #distillation starts, load firsts teacher model 
+                if step == self.model_args.CL_steps and self.model_args.distill_teacher is not None:
+                    #packing distillation teachers 
+                    #when the best checkpoint is saved, shallow copy it and load it as the teache model.
+                    print("Distillation starts, load previous best checkpoint as distillation teacher!!!!!!")
+                    
+                    self.teachers = nn.ModuleList([AutoModel.from_pretrained(p).eval() for p in self.model_args.distill_teacher])
+                    if self.args.n_gpu==1:
+
+                        #self.teachers = self.teachers.to("cuda")
+                        for i in range(len(self.teachers)):
+                            self.teachers[i] = self.teachers[i].to("cuda")
+                        
+                    else:
+                        for i in range(len(self.teachers)):
+                            device = torch.device(f"cuda:{i%(self.args.n_gpu -self.args.n_gpu_for_training)+self.args.n_gpu_for_training}")
+                            self.teachers[i] = self.teachers[i].to(device)
+
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
@@ -549,8 +585,10 @@ class CLTrainer(Trainer):
                                 sim_t += self.model_args.distill_alpha *  sim_tt/ n_base
                             else: #large model
                                 sim_t += (1-self.model_args.distill_alpha) * sim_tt/ n_large
+                    
                     if odd and i==(len(self.teachers)-1):
                         sim_t = (1-self.args.tt)*sim_t+self.args.tt*sim_tt
+                        
                 inputs["sim_t"] = sim_t.cpu()
 
                 if self.args.stopping_steps is not None and step>self.args.stopping_steps:
